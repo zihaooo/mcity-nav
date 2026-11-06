@@ -40,6 +40,9 @@ button.primary { background: var(--accent); border-color: var(--accent); color: 
 button.on { border-color: var(--accent); color: var(--accent); }
 button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .credit { position: absolute; left: max(8px, env(safe-area-inset-left, 0px)); bottom: 6px; font-size: 11px; color: rgba(242,245,243,0.8); text-shadow: 0 0 3px #000; pointer-events: none; }
+.simrow { grid-template-columns: 1fr 1fr; font-size: 14px; color: var(--muted); }
+.simrow label { display: flex; align-items: center; gap: 6px; }
+.simrow select { flex: 1; min-height: 40px; border-radius: 10px; background: var(--panel-2); color: var(--fg); border: 1px solid var(--rule); font: 500 15px var(--body); padding: 0 6px; }
 .list { position: absolute; inset: 0; background: rgba(11, 15, 14, 0.97); overflow-y: auto; padding: 10px max(14px, env(safe-area-inset-right, 0px)) 20px max(14px, env(safe-area-inset-left, 0px)); }
 .list h2 { font-family: var(--display); font-size: 20px; margin: 4px 0 8px; }
 .list ol { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; }
@@ -75,6 +78,10 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
       <button id="next" aria-label="Next instruction">▶</button>
       <button id="more">List</button>
     </div>
+    <div class="controls simrow" id="simrow" hidden>
+      <label>Noise <select id="simnoise"><option value="3">3 m</option><option value="5" selected>5 m</option><option value="10">10 m</option></select></label>
+      <label>Test <select id="simscen"><option value="route">On route</option><option value="miss">Miss a turn</option><option value="mid">Start mid-route</option><option value="drop">Dropouts</option></select></label>
+    </div>
     <div class="controls" style="grid-template-columns: 1fr 1fr 1fr">
       <button id="voice">Voice off</button>
       <button id="speed">Demo ×2</button>
@@ -90,7 +97,7 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   const cv = document.getElementById('map'), ctx = cv.getContext('2d'), box = document.getElementById('mapbox');
   const el = id => document.getElementById(id);
   let s = 0, mode = 'idle', headingUp = true, zoom = 5.0, viewAng = 0, fix = null;
-  let voiceOn = false, demoMul = 2, lastT = 0, watchId = null, wake = null, announced = {};
+  let carT = 0, wasOff = false, voiceOn = false, demoMul = 2, lastT = 0, watchId = null, wake = null, announced = {};
   try { const saved = parseFloat(localStorage.getItem('mcity-nav-s')); if (saved > 30 && saved < TOTAL - 30) { s = saved; showAlert(`Resumed at km ${(s / 1000).toFixed(2)}. Tap Restart to begin from the start.`); } } catch (e) {}
   const idx = v => Math.max(0, Math.min(N - 1, Math.round(v / STEP)));
   // ---- GPS: WGS84 -> map frame (ENU tangent plane, then the map rotation), as in the coverage pipeline
@@ -100,6 +107,59 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
     const d0 = e - G.t[0], d1 = n - G.t[1], d2 = -G.t[2], R = G.R;
     return [R[0][0] * d0 + R[1][0] * d1 + R[2][0] * d2, R[0][1] * d0 + R[1][1] * d1 + R[2][1] * d2];
   }
+  function mapToLL(x, y) {
+    const R = G.R, e = R[0][0] * x + R[0][1] * y + G.t[0], n = R[1][0] * x + R[1][1] * y + G.t[1];
+    return [G.lat0 + n / G.RM * 180 / Math.PI, G.lon0 + e / (G.RN * Math.cos(G.lat0 * Math.PI / 180)) * 180 / Math.PI];
+  }
+  // ---- simulated GPS (open the page with #sim): fake fixes through the same handler as the real GPS
+  const SIM = /(^#|[#&])sim\b/.test(location.hash);
+  function simGeo() {
+    let timer = null, ss = 0, tsim = 0, seed = 1, plan = null, pause = 0;
+    const seedArg = (location.hash.match(/sim=(\d+)/) || [])[1];   // #sim=<n> replays one noise sequence; plain #sim draws a new one each start
+    const rnd = () => { seed = (seed * 16807) % 2147483647; return seed / 2147483647; };
+    const gauss = () => { let a = 0, b = 0; while (!a) a = rnd(); while (!b) b = rnd(); return Math.sqrt(-2 * Math.log(a)) * Math.cos(2 * Math.PI * b); };
+    const turnNear = q => M.some(m => (Math.abs(m.angle) >= 30 || m.kind === 'roundabout') && Math.abs(m.s - q) < 15);
+    return {
+      watchPosition(ok, err) {
+        const noise = +el('simnoise').value, scen = el('simscen').value;
+        ss = scen === 'mid' ? Math.min(TOTAL - 200, 2000) : s; tsim = Date.now(); plan = null; pause = 0;
+        seed = seedArg ? 1 + (+seedArg % 2147483646) : 1 + Math.floor(Math.random() * 2147483646);
+        if (scen === 'miss') {                 // a turn where going straight on follows a road the route drives later
+          const onRoad = (x, y) => { for (let q = 0; q < N; q++) if (Math.hypot(X[q] - x, Y[q] - y) < 5) return true; return false; };
+          const m = M.find(m => { if (m.s < ss + 150 || m.kind !== 'turn') return false;
+            const i = idx(m.s - 6), j = idx(m.s), hx = Math.cos(H[i] * Math.PI / 180), hy = Math.sin(H[i] * Math.PI / 180);
+            return [25, 45, 70].every(d => onRoad(X[j] + hx * d, Y[j] + hy * d)); })
+            || M.find(m => m.s > ss + 150 && m.kind === 'turn');
+          if (m) plan = { at: m.s, phase: 0, d: 0 };
+        }
+        timer = setInterval(() => {
+          tsim += 1000;
+          const v = turnNear(ss) ? 4 : 7.8;
+          let x, y, hdg;
+          if (plan && ss >= plan.at && plan.phase < 3) {           // missed turn: overshoot straight on, stop, come back
+            const i = idx(plan.at - 6), hx = Math.cos(H[i] * Math.PI / 180), hy = Math.sin(H[i] * Math.PI / 180), j = idx(plan.at);
+            if (plan.phase === 0) { plan.d += v; if (plan.d >= 70) plan.phase = 1; }
+            else if (plan.phase === 1) { pause++; if (pause >= 5) plan.phase = 2; }
+            else { plan.d -= v; if (plan.d <= 0) { plan.phase = 3; plan.d = 0; } }
+            x = X[j] + hx * plan.d; y = Y[j] + hy * plan.d; hdg = plan.phase === 2 ? H[i] + 180 : H[i];
+          } else {
+            ss = Math.min(TOTAL, ss + v); const i = idx(ss); x = X[i]; y = Y[i]; hdg = H[i];
+          }
+          const lost = scen === 'drop' && (tsim / 1000) % 45 < 8;           // signal lost for 8 s of every 45 s
+          window.__sim = { ss, x, y, t: tsim, phase: plan && ss >= plan.at ? plan.phase : -1, at: plan ? plan.at : null, s, lost };
+          if (lost) return;           // signal lost for 8 s of every 45 s
+          const ll = mapToLL(x + noise / 1.4 * gauss(), y + noise / 1.4 * gauss());
+          const moving = !(plan && plan.phase === 1);
+          ok({ timestamp: tsim, coords: { latitude: ll[0], longitude: ll[1], accuracy: noise * 1.6, speed: moving ? v * (1 + 0.1 * gauss()) : 0,
+               heading: moving ? ((90 - hdg + 8 * gauss()) % 360 + 360) % 360 : NaN } });
+          if (ss >= TOTAL) clearInterval(timer);
+        }, 1000 / demoMul);
+        return 1;
+      },
+      clearWatch() { if (timer) clearInterval(timer); timer = null; }
+    };
+  }
+  const GEO = SIM ? simGeo() : null;
   const mapToPx = (x, y) => [D.px.ox + (x - D.px.x0) * D.px.sx, D.px.oy + (y - D.px.y0) * D.px.sy];
   // ---- progress matching (same source is unit-tested): motion prior + heading agreement + distance
   /*MATCH*/
@@ -107,32 +167,59 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
     const N = X.length;
     const idx = v => Math.max(0, Math.min(N - 1, Math.round(v / STEP)));
     const angd = (a, b) => { let d = (a - b) % 360; if (d > 180) d -= 360; if (d < -180) d += 360; return Math.abs(d); };
-    const st = { s: 0, t: null, off: 0, offRoute: false };
-    function score(q, mx, my, course, expected) {
+    const st = { s: 0, t: null, off: 0, offRoute: false, searching: false, lastGood: null, pend: null };
+    const hist = [];                        // recent fixes, each with the distance driven since (b)
+    function score(q, mx, my, course, expected, slack) {
       let sc = Math.hypot(X[q] - mx, Y[q] - my);
       if (course !== null) sc += 0.25 * Math.max(0, angd(H[q], course) - 25);
-      return sc + 0.08 * Math.abs(q * STEP - expected);
+      const dev = Math.abs(q * STEP - expected);         // motion prior: mild near the expected advance, steep beyond what the car could drive
+      return sc + 0.08 * dev + 0.4 * Math.max(0, dev - slack);
     }
+    // how well the recent fixes lie on the route behind point q (each fix moved back by the distance driven since)
+    function fit(q) {
+      let e = 0, n = 0;
+      for (const f of hist) { if (f.b > 150) continue; const r = idx(q * STEP - f.b); e += Math.min(40, Math.hypot(X[r] - f.x, Y[r] - f.y)); n++; }
+      return n ? e / n : 0;
+    }
+    // best route point anywhere that fits the recent fixes and is driven in the car's direction;
+    // order: nearest to the current progress in route order (unless the progress is unknown); g2 = best clearly different place
+    function anywhere(mx, my, course, tol, useOrder) {
+      let g = null; const c = [];
+      for (let q = 0; q < N; q++) {
+        const dq = Math.hypot(X[q] - mx, Y[q] - my); if (dq > tol) continue;
+        if (course !== null && angd(H[q], course) > 60) continue;
+        const sc = fit(q) + (course !== null ? 0.25 * Math.max(0, angd(H[q], course) - 25) : 0) + (useOrder ? 0.02 * Math.abs(q * STEP - st.s) : 0);
+        c.push({ q, sc }); if (!g || sc < g.sc) g = { q, sc };
+      }
+      if (g) { let g2 = null; for (const o of c) if (Math.abs(o.q - g.q) * STEP > 60 && (!g2 || o.sc < g2.sc)) g2 = o; g.g2 = g2; }
+      return g;
+    }
+    st.reset = function (s) { st.s = s; st.t = null; st.off = 0; st.offRoute = false; st.searching = false; st.lastGood = null; st.pend = null; hist.length = 0; };
     st.update = function (mx, my, course, speed, acc, t) {
-      const dt = st.t === null ? 1 : Math.min(5, Math.max(0.2, (t - st.t) / 1000)); st.t = t;
+      const dt = st.t === null ? 1 : Math.min(10, Math.max(0.2, (t - st.t) / 1000)); st.t = t;
       const v = speed > 0.5 ? speed : 0, useCourse = v > 2 ? course : null;
       const expected = st.s + v * dt, tol = Math.max(20, 1.5 * (acc || 10));
+      const take = q => { st.s = q * STEP; st.off = 0; st.offRoute = false; st.searching = false; st.pend = null; st.lastGood = t; };
+      for (const f of hist) f.b += v * dt; hist.push({ x: mx, y: my, b: 0 }); if (hist.length > 8) hist.shift();
       let best = null;
       for (let q = idx(st.s - 20), q1 = idx(st.s + Math.max(80, v * dt * 2.5 + 60)); q <= q1; q++) {
-        const sc = score(q, mx, my, useCourse, expected);
+        const sc = score(q, mx, my, useCourse, expected, 15 + 0.5 * v * dt);
         if (!best || sc < best.sc) best = { q, sc };
       }
-      const d = Math.hypot(X[best.q] - mx, Y[best.q] - my);
-      if (d <= tol) { st.s = Math.max(st.s - 20, best.q * STEP); st.off = 0; st.offRoute = false; return; }
+      if (Math.hypot(X[best.q] - mx, Y[best.q] - my) <= tol) { take(Math.max(best.q, idx(st.s - 20))); return; }
       if (++st.off < 3) return;
-      let g = null;                         // lost: re-acquire anywhere ahead (or just behind) that fits position and heading
-      for (let q = 0; q < N; q++) {
-        const ahead = q * STEP - st.s; if (ahead < -60) continue;
-        const dq = Math.hypot(X[q] - mx, Y[q] - my); if (dq > tol) continue;
-        const sc = dq + (useCourse !== null ? 0.25 * Math.max(0, angd(H[q], useCourse) - 25) : 0) + 0.02 * Math.abs(ahead);
-        if (!g || sc < g.sc) g = { q, sc };
-      }
-      if (g) { st.s = g.q * STEP; st.off = 0; st.offRoute = false; } else st.offRoute = true;
+      const fresh = st.lastGood === null || t - st.lastGood > 60000;
+      const g = anywhere(mx, my, useCourse, tol, !fresh);
+      if (!g) { st.offRoute = !fresh; st.searching = fresh; st.pend = null; return; }
+      const gs = g.q * STEP, jump = gs - st.s;
+      // progress unknown (page just opened, or long off the route): take the best place once it clearly beats any other
+      if (fresh) { if (g.g2 && g.g2.sc - g.sc < 4 && st.off < 12) { st.searching = true; st.offRoute = false; } else take(g.q); return; }
+      if (jump >= -60 && jump <= 150) { take(g.q); return; }       // a short step is safe
+      // a far jump right after leaving the route is usually a missed turn onto a lane the route drives later:
+      // keep pointing back to the missed turn, and follow the far section only once the driver keeps to it (15 s and 100 m)
+      const p = st.pend;
+      if (p && gs >= p.sLast - 10 && gs <= p.sLast + v * dt + 30) p.sLast = gs; else st.pend = { s0: gs, sLast: gs, t0: t };
+      if (st.pend.sLast - st.pend.s0 >= 100 && t - st.pend.t0 >= 15000) take(g.q); else st.offRoute = true;
     };
     return st;
   }
@@ -143,10 +230,18 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
     const courseMap = (c.heading !== null && !isNaN(c.heading)) ? 90 - c.heading : null;
     let sp = (c.speed !== null && c.speed >= 0) ? c.speed : null;
     if (sp === null && fix) { const dtf = (p.timestamp - fix.t) / 1000; if (dtf > 0.2) sp = Math.hypot(m[0] - fix.x, m[1] - fix.y) / dtf; }
-    fix = { x: m[0], y: m[1], acc: c.accuracy, speed: sp || 0, t: p.timestamp };
+    fix = { x: m[0], y: m[1], acc: c.accuracy, speed: sp || 0, t: p.timestamp, course: (sp || 0) > 2 ? courseMap : null };
     MT.s = s; MT.update(m[0], m[1], courseMap, sp || 0, c.accuracy, p.timestamp); s = MT.s;
-    if (MT.offRoute) showAlert('Off the route: return to the highlighted road. The navigator picks you up again when you are back on it.', true);
-    else hideAlert();
+    if (MT.searching) showAlert('Finding your place on the route…');
+    else if (MT.offRoute) {
+      const q = idx(s), dx = X[q] - m[0], dy = Y[q] - m[1], dist = Math.hypot(dx, dy);
+      let where = '';
+      if (courseMap !== null && (sp || 0) > 2) { const rel = ((Math.atan2(dy, dx) * 180 / Math.PI - courseMap) % 360 + 540) % 360 - 180;
+        where = Math.abs(rel) < 45 ? ' ahead' : Math.abs(rel) > 135 ? ' behind you' : rel > 0 ? ' to your left' : ' to your right'; }
+      showAlert(`Off the route. Rejoin it ${Math.max(10, Math.round(dist / 10) * 10)} m${where}, where the highlighted road starts. Or pick your position in the List.`, true);
+      if (!wasOff) say('Off the route. Rejoin ' + Math.max(10, Math.round(dist / 10) * 10) + ' metres' + where);
+    } else hideAlert();
+    wasOff = MT.offRoute;
     update();
   }
   function onErr(e) {
@@ -154,13 +249,13 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
     showAlert(e.code === 1 ? 'Location is not available here. Inside claude.ai pages cannot read the phone’s GPS; open the standalone copy of this navigator from an https address for live GPS. Demo and the ◀ ▶ buttons work here.' : 'No GPS fix yet (' + e.message + '). Keep the phone where it can see the sky.', true);
   }
   function startGps() {
-    if (!('geolocation' in navigator)) { onErr({ code: 1, message: 'no geolocation' }); return; }
-    stopDemo(); mode = 'gps'; el('start').textContent = 'Stop GPS'; el('start').classList.remove('primary');
-    showAlert('Waiting for GPS…');
-    try { watchId = navigator.geolocation.watchPosition(onFix, onErr, { enableHighAccuracy: true, maximumAge: 0, timeout: 20000 }); } catch (e) { onErr({ code: 1, message: String(e) }); }
+    if (!SIM && !('geolocation' in navigator)) { onErr({ code: 1, message: 'no geolocation' }); return; }
+    stopDemo(); mode = 'gps'; el('start').textContent = SIM ? 'Stop sim' : 'Stop GPS'; el('start').classList.remove('primary');
+    showAlert(SIM ? 'Simulated GPS: fixes start in a second.' : 'Waiting for GPS…');
+    try { watchId = (GEO || navigator.geolocation).watchPosition(onFix, onErr, { enableHighAccuracy: true, maximumAge: 0, timeout: 20000 }); } catch (e) { onErr({ code: 1, message: String(e) }); }
     keepAwake(); speakUnlock();
   }
-  function stopGps() { if (watchId !== null) { try { navigator.geolocation.clearWatch(watchId); } catch (e) {} } watchId = null; if (mode === 'gps') mode = 'idle'; el('start').textContent = 'Start GPS'; el('start').classList.add('primary'); }
+  function stopGps() { if (watchId !== null) { try { (GEO || navigator.geolocation).clearWatch(watchId); } catch (e) {} } watchId = null; if (mode === 'gps') mode = 'idle'; el('start').textContent = SIM ? 'Start sim GPS' : 'Start GPS'; el('start').classList.add('primary'); }
   // ---- demo: drive the route at 7.8 m/s times the multiplier
   function demoTick(t) {
     if (mode !== 'demo') return;
@@ -190,7 +285,7 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   const fmtD = d => d >= 1000 ? `${(d / 1000).toFixed(1)}<small>km</small>` : `${Math.max(0, Math.round(d / 10) * 10)}<small>m</small>`;
   function update() {
     const k = nextIdx(), m = M[k], d = m.s - s;
-    el('icon').innerHTML = iconSVG(m); el('dist').innerHTML = fmtD(d); el('text').textContent = m.text;
+    el('icon').innerHTML = iconSVG(m); el('dist').innerHTML = mode === 'gps' && MT.offRoute ? '–' : fmtD(d); el('text').textContent = m.text;
     const n2 = M[k + 1];
     el('then').innerHTML = (n2 && n2.s - m.s < 120 && m.kind !== 'arrive') ? `Then <b>${n2.text.toLowerCase()}</b> ${Math.round((n2.s - m.s) / 10) * 10} m later` : '';
     // spoken prompts: early and at the turn
@@ -202,7 +297,7 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
     const leg = D.legs.reduce((acc, g, i) => g <= s + 1 ? i : acc, 0);
     const left = TOTAL - s;
     el('status').innerHTML = `<span><b>${(s / 1000).toFixed(2)}</b> / ${(TOTAL / 1000).toFixed(2)} km</span><span><b>${Math.ceil(left / 7.8 / 60)}</b> min left</span><span>leg <b>${leg + 1}</b>/${D.legs.length}</span>` +
-      (mode === 'gps' && fix ? `<span>GPS ±<b>${Math.round(fix.acc)}</b> m</span>` : mode === 'demo' ? '<span><b>Demo</b></span>' : '');
+      (mode === 'gps' && fix ? `<span>${SIM ? 'Sim GPS' : 'GPS'} ±<b>${Math.round(fix.acc)}</b> m</span>` : mode === 'demo' ? '<span><b>Demo</b></span>' : '') + (SIM ? '<span><b>Simulated GPS mode</b></span>' : '');
     el('barfill').style.width = (100 * s / TOTAL).toFixed(1) + '%';
     if (!el('list').hidden) markList();
     try { localStorage.setItem('mcity-nav-s', String(Math.round(s))); } catch (e) {}
@@ -214,11 +309,16 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
     if (cv.width !== Math.round(w * dpr) || cv.height !== Math.round(h * dpr)) { cv.width = Math.round(w * dpr); cv.height = Math.round(h * dpr); }
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.fillStyle = '#0b0f0e'; ctx.fillRect(0, 0, w, h);
     const i = idx(s), j = Math.min(N - 1, i + 4), i2 = Math.max(0, i - 4);
-    const target = Math.atan2(V[j] - V[i2], U[j] - U[i2]);
+    // off the route: follow the car itself (its position and course), not the matched route point
+    const lost = mode === 'gps' && fix && MT.offRoute, routeT = Math.atan2(V[j] - V[i2], U[j] - U[i2]);
+    if (!lost) carT = routeT;
+    else if (fix.course !== null) carT = Math.atan2(Math.sin(fix.course * Math.PI / 180) * D.px.sy, Math.cos(fix.course * Math.PI / 180) * D.px.sx);
+    const target = lost ? carT : routeT, cp = lost ? mapToPx(fix.x, fix.y) : [U[i], V[i]];
     const want = headingUp ? -Math.PI / 2 - target : 0;
     let dv = want - viewAng; while (dv > Math.PI) dv -= 2 * Math.PI; while (dv < -Math.PI) dv += 2 * Math.PI;
     viewAng += dv * (mode === 'demo' ? 0.25 : 0.5);
-    const k = zoom / D.ppm, ax = w / 2, ay = headingUp ? h * 0.66 : h / 2, cu = U[i], cvv = V[i];
+    const zEff = lost ? Math.min(zoom, Math.max(0.8, 0.36 * Math.min(w, h) / Math.max(1, Math.hypot(fix.x - X[i], fix.y - Y[i])))) : zoom;
+    const k = zEff / D.ppm, ax = w / 2, ay = headingUp && !lost ? h * 0.66 : h / 2, cu = cp[0], cvv = cp[1];
     ctx.save(); ctx.translate(ax, ay); ctx.rotate(viewAng); ctx.scale(k, k); ctx.translate(-cu, -cvv);
     if (imgReady) ctx.drawImage(img, 0, 0);
     const lw = px => px / k;
@@ -236,17 +336,22 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
     if (mode === 'gps' && fix) {
       const q = mapToPx(fix.x, fix.y);
       ctx.fillStyle = 'rgba(43,215,255,0.12)'; ctx.beginPath(); ctx.arc(q[0], q[1], fix.acc * D.ppm, 0, 7); ctx.fill();
-      ctx.fillStyle = '#ffffff'; ctx.beginPath(); ctx.arc(q[0], q[1], lw(4), 0, 7); ctx.fill();
+      if (!lost) { ctx.fillStyle = '#ffffff'; ctx.beginPath(); ctx.arc(q[0], q[1], lw(4), 0, 7); ctx.fill(); }
+      else {                                   // dashed line back to where the route continues
+        ctx.setLineDash([lw(10), lw(8)]); ctx.strokeStyle = '#ff6b5b'; ctx.lineWidth = lw(4);
+        ctx.beginPath(); ctx.moveTo(q[0], q[1]); ctx.lineTo(U[i], V[i]); ctx.stroke(); ctx.setLineDash([]);
+        ctx.fillStyle = '#ff6b5b'; ctx.strokeStyle = '#000'; ctx.lineWidth = lw(2); ctx.beginPath(); ctx.arc(U[i], V[i], lw(7), 0, 7); ctx.fill(); ctx.stroke();
+      }
     }
     ctx.restore();
-    // car marker at the matched position, pointing along the route
+    // car marker: at the matched position along the route, or at the car itself (red) when off the route
     ctx.save(); ctx.translate(ax, ay); ctx.rotate(headingUp ? 0 : target + Math.PI / 2);
-    ctx.fillStyle = '#2bd7ff'; ctx.strokeStyle = '#032029'; ctx.lineWidth = 3;
+    ctx.fillStyle = lost ? '#ff6b5b' : '#2bd7ff'; ctx.strokeStyle = lost ? '#2a0603' : '#032029'; ctx.lineWidth = 3;
     ctx.beginPath(); ctx.moveTo(0, -18); ctx.lineTo(12, 14); ctx.lineTo(0, 7); ctx.lineTo(-12, 14); ctx.closePath(); ctx.fill(); ctx.stroke(); ctx.restore();
   }
   // ---- list
   function buildList() { el('listol').innerHTML = M.map((m, k) => `<li data-k="${k}"><span>${(m.s / 1000).toFixed(2)}</span><div>${m.text}</div></li>`).join('');
-    el('listol').querySelectorAll('li').forEach(li => li.addEventListener('click', () => { const m = M[+li.dataset.k]; if (mode === 'gps') return; s = Math.max(0, m.s - 30); el('list').hidden = true; el('more').classList.remove('on'); update(); })); }
+    el('listol').querySelectorAll('li').forEach(li => li.addEventListener('click', () => { const m = M[+li.dataset.k]; s = Math.max(0, m.s - 30); if (mode === 'gps') MT.reset(s); el('list').hidden = true; el('more').classList.remove('on'); update(); })); }
   function markList() { const k = nextIdx(); el('listol').querySelectorAll('li').forEach(li => { const q = +li.dataset.k; li.classList.toggle('next', q === k); li.classList.toggle('done', q < k); }); }
   // ---- alerts
   function showAlert(t, warn) { const a = el('alert'); a.textContent = t; a.hidden = false; a.classList.toggle('off', !!warn); }
@@ -261,9 +366,10 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   el('orient').addEventListener('click', () => { headingUp = !headingUp; el('orient').textContent = headingUp ? 'H' : 'N'; draw(); });
   el('voice').addEventListener('click', () => { voiceOn = !voiceOn; el('voice').textContent = voiceOn ? 'Voice on' : 'Voice off'; el('voice').classList.toggle('on', voiceOn); if (voiceOn) say('Voice guidance on'); });
   el('speed').addEventListener('click', () => { demoMul = demoMul === 1 ? 2 : demoMul === 2 ? 4 : 1; el('speed').textContent = 'Demo ×' + demoMul; });
-  el('restart').addEventListener('click', () => { s = 0; MT.s = 0; MT.t = null; announced = {}; hideAlert(); update(); });
+  el('restart').addEventListener('click', () => { s = 0; MT.reset(0); announced = {}; hideAlert(); update(); });
   el('more').addEventListener('click', () => { const L = el('list'); L.hidden = !L.hidden; el('more').classList.toggle('on', !L.hidden); if (!L.hidden) { markList(); const n = L.querySelector('li.next'); if (n) n.scrollIntoView({ block: 'center' }); } });
   window.addEventListener('resize', draw);
+  if (SIM) { el('simrow').hidden = false; el('start').textContent = 'Start sim GPS'; }
   buildList(); update();
 })();
 </script>
