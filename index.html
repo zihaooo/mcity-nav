@@ -338,19 +338,19 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
     ctx.lineCap = 'round'; ctx.lineJoin = 'round';
     ctx.strokeStyle = 'rgba(255,255,255,0.35)'; ctx.lineWidth = lw(3); path(0, N - 1);
     ctx.strokeStyle = 'rgba(120,130,125,0.85)'; ctx.lineWidth = lw(4); path(0, i);
-    // next 400 m as a gradient: white at the car, cyan by ~120 m, deep blue by 400 m, wider near the car; drawn far to
+    // next 400 m as a gradient: strong blue at the car fading to white by 400 m (user's choice), wider near the car; drawn far to
     // near so the nearest stretch stays on top where the route crosses itself (user, 2026-11-07: roundabout passes
     // were indistinguishable); chevrons along the first 150 m show the way
     const ahead = Math.min(N - 1, i + Math.round(400 / STEP)), S = Math.max(1, Math.round(10 / STEP));
     ctx.strokeStyle = 'rgba(0,0,0,0.7)'; ctx.lineWidth = lw(12); path(i, ahead);
     const mix = (c0, c1, t) => c0.map((v, k) => Math.round(v + (c1[k] - v) * t));
-    const near = [255, 255, 255], mid = [43, 215, 255], far = [18, 86, 200];
+    const near = [20, 110, 255], far = [255, 255, 255];
     for (let q = ahead; q > i; q -= S) {
       const q0 = Math.max(i, q - S), t = Math.min(1, (q0 - i) * STEP / 400);
-      const c = t < 0.3 ? mix(near, mid, t / 0.3) : mix(mid, far, (t - 0.3) / 0.7);
+      const c = mix(near, far, t);
       ctx.strokeStyle = `rgb(${c[0]},${c[1]},${c[2]})`; ctx.lineWidth = lw(9 - 3 * t); path(q0, Math.min(ahead, q0 + S + 1));
     }
-    ctx.strokeStyle = 'rgba(0,30,50,0.85)'; ctx.lineWidth = lw(3);
+    ctx.strokeStyle = 'rgba(255,255,255,0.95)'; ctx.lineWidth = lw(3);
     for (let q = i + Math.round(20 / STEP); q < Math.min(ahead - 1, i + Math.round(160 / STEP)); q += Math.round(25 / STEP)) {
       const a = Math.atan2(V[q + 1] - V[q - 1], U[q + 1] - U[q - 1]), e = lw(6.5);
       ctx.beginPath(); ctx.moveTo(U[q] - e * Math.cos(a - 0.6), V[q] - e * Math.sin(a - 0.6)); ctx.lineTo(U[q], V[q]);
