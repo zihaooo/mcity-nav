@@ -1,6 +1,6 @@
 # Mcity route navigator
 
-In-car turn-by-turn navigator for the recommended Mcity scan route (every lane once in its legal direction, 5.92 km).
+In-car turn-by-turn navigator for the recommended Mcity scan route (every link once in its legal direction, 5.65 km, ending without a drive back to the start).
 Open the GitHub Pages site on an iPhone, tap **Start GPS** and allow location; **Demo** previews the drive.
 
 To test without driving, open https://zihaooo.github.io/mcity-nav/#sim and tap **Start sim GPS**. The page then gets fake
