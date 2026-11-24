@@ -48,11 +48,12 @@ canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block
 .controls { display: grid; grid-template-columns: 1.4fr 1fr 0.8fr 0.8fr 1fr; gap: 8px; }
 .controls[hidden] { display: none; }   /* the sim settings row: display: grid above would override the hidden attribute */
 /* GPS live (first fix received): the demo, step and demo-speed buttons and the sim settings go, and the four that remain
-   (Stop GPS, List, Voice, Restart) share one row, so the map gets the height */
-.bottom.gps-live .ctl { grid-template-columns: 1.15fr 0.7fr 1.2fr 1fr; }
+   (Stop GPS, List, Voice) share one row, so the map gets the height; Restart goes too (user, 2026-11-24): GPS finds the
+   place by itself, and an accidental tap while driving would reset the progress */
+.bottom.gps-live .ctl { grid-template-columns: 1.2fr 0.8fr 1.2fr; }
 .bottom.gps-live .ctl button { white-space: nowrap; }
 .bottom.gps-live .ctl .controls { display: contents; }
-.bottom.gps-live #demo, .bottom.gps-live #prev, .bottom.gps-live #next, .bottom.gps-live #speed, .bottom.gps-live #simrow { display: none; }
+.bottom.gps-live #demo, .bottom.gps-live #prev, .bottom.gps-live #next, .bottom.gps-live #speed, .bottom.gps-live #restart, .bottom.gps-live #simrow { display: none; }
 button { appearance: none; border: 1px solid var(--rule); background: var(--panel-2); color: var(--fg); border-radius: 12px; min-height: 48px; font: 600 16px var(--body); padding: 0 8px; cursor: pointer; }
 button.primary { background: var(--accent); border-color: var(--accent); color: #032029; }
 button.on { border-color: var(--accent); color: var(--accent); }
