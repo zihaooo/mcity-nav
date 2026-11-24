@@ -44,7 +44,15 @@ canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block
 .status b { color: var(--fg); font-weight: 600; }
 .bar { height: 5px; border-radius: 3px; background: var(--panel-2); overflow: hidden; }
 .bar i { display: block; height: 100%; width: 0; background: var(--accent); }
+.ctl { display: grid; gap: 8px; }
 .controls { display: grid; grid-template-columns: 1.4fr 1fr 0.8fr 0.8fr 1fr; gap: 8px; }
+.controls[hidden] { display: none; }   /* the sim settings row: display: grid above would override the hidden attribute */
+/* GPS live (first fix received): the demo, step and demo-speed buttons and the sim settings go, and the four that remain
+   (Stop GPS, List, Voice, Restart) share one row, so the map gets the height */
+.bottom.gps-live .ctl { grid-template-columns: 1.15fr 0.7fr 1.2fr 1fr; }
+.bottom.gps-live .ctl button { white-space: nowrap; }
+.bottom.gps-live .ctl .controls { display: contents; }
+.bottom.gps-live #demo, .bottom.gps-live #prev, .bottom.gps-live #next, .bottom.gps-live #speed, .bottom.gps-live #simrow { display: none; }
 button { appearance: none; border: 1px solid var(--rule); background: var(--panel-2); color: var(--fg); border-radius: 12px; min-height: 48px; font: 600 16px var(--body); padding: 0 8px; cursor: pointer; }
 button.primary { background: var(--accent); border-color: var(--accent); color: #032029; }
 button.on { border-color: var(--accent); color: var(--accent); }
@@ -82,6 +90,7 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   <footer class="bottom">
     <div class="status" id="status"></div>
     <div class="bar"><i id="barfill"></i></div>
+    <div class="ctl">
     <div class="controls">
       <button class="primary" id="start">Start GPS</button>
       <button id="demo">Demo</button>
@@ -98,6 +107,7 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
       <button id="speed">Demo ×2</button>
       <button id="restart">Restart</button>
     </div>
+    </div>
   </footer>
 </div>
 <script>
@@ -108,7 +118,7 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   const cv = document.getElementById('map'), ctx = cv.getContext('2d'), box = document.getElementById('mapbox');
   const el = id => document.getElementById(id);
   let s = 0, mode = 'idle', headingUp = true, zoom = 5.0, viewAng = 0, fix = null;
-  let carT = 0, wasOff = false, voiceOn = false, demoMul = 2, lastT = 0, watchId = null, wake = null, announced = {};
+  let gpsLive = false, carT = 0, wasOff = false, voiceOn = false, demoMul = 2, lastT = 0, watchId = null, wake = null, announced = {};
   try { const saved = parseFloat(localStorage.getItem('mcity-nav-s')); if (saved > 30 && saved < TOTAL - 30) { s = saved; showAlert(`Resumed at km ${(s / 1000).toFixed(2)}. Tap Restart to begin from the start.`); } } catch (e) {}
   const idx = v => Math.max(0, Math.min(N - 1, Math.round(v / STEP)));
   // ---- GPS: WGS84 -> map frame (ENU tangent plane, then the map rotation), as in the coverage pipeline
@@ -250,6 +260,7 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   /*END*/
   const MT = makeMatcher(X, Y, H, STEP);
   function onFix(p) {
+    if (!gpsLive) { gpsLive = true; document.querySelector('.bottom').classList.add('gps-live'); requestAnimationFrame(draw); }   // GPS works: free the panel for the map
     const c = p.coords, m = llToMap(c.latitude, c.longitude);
     const courseMap = (c.heading !== null && !isNaN(c.heading)) ? 90 - c.heading : null;
     let sp = (c.speed !== null && c.speed >= 0) ? c.speed : null;
@@ -279,7 +290,7 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
     try { watchId = (GEO || navigator.geolocation).watchPosition(onFix, onErr, { enableHighAccuracy: true, maximumAge: 0, timeout: 20000 }); } catch (e) { onErr({ code: 1, message: String(e) }); }
     keepAwake(); speakUnlock();
   }
-  function stopGps() { if (watchId !== null) { try { (GEO || navigator.geolocation).clearWatch(watchId); } catch (e) {} } watchId = null; if (mode === 'gps') mode = 'idle'; el('start').textContent = SIM ? 'Start sim GPS' : 'Start GPS'; el('start').classList.add('primary'); }
+  function stopGps() { if (gpsLive) { gpsLive = false; document.querySelector('.bottom').classList.remove('gps-live'); requestAnimationFrame(draw); } if (watchId !== null) { try { (GEO || navigator.geolocation).clearWatch(watchId); } catch (e) {} } watchId = null; if (mode === 'gps') mode = 'idle'; el('start').textContent = SIM ? 'Start sim GPS' : 'Start GPS'; el('start').classList.add('primary'); }
   // ---- demo: drive the route at 7.8 m/s times the multiplier
   function demoTick(t) {
     if (mode !== 'demo') return;
